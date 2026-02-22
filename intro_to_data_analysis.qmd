@@ -1,0 +1,859 @@
+---
+title: "Introduction to Data Analysis in R"
+subtitle: "Using NHS Antibiotic Prescribing Data"
+author: "Ben Stanbury"
+date: today
+format:
+  html:
+    toc: true
+    toc-location: left
+    theme: flatly
+    highlight-style: tango
+    code-fold: false
+    self-contained: true
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+params:
+  use_one_month: true
+  sample_month: 202511
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+use_one_month <- isTRUE(params$use_one_month)
+sample_month <- as.integer(params$sample_month)
+
+filter_to_month <- function(data) {
+  if (!use_one_month || !"year_month" %in% names(data)) {
+    return(data)
+  }
+
+  months <- sort(unique(as.integer(data$year_month)))
+  if (!sample_month %in% months) {
+    stop(sprintf(
+      "sample_month=%d not found in data. Available months: %s",
+      sample_month,
+      paste(months, collapse = ", ")
+    ))
+  }
+
+  data %>%
+    mutate(year_month = as.integer(year_month)) %>%
+    filter(year_month == sample_month)
+}
+```
+
+## Introduction
+
+We'll learn the fundamentals of data analysis using R and the tidyverse. Rather than working with artificial examples, we'll use real data from the NHS, specifically, records of antibiotic prescriptions dispensed by GP practices across England.
+
+Antibiotic resistance is one of the greatest threats to global health, and understanding prescribing patterns helps the NHS target interventions where they're needed most. By the end of this tutorial, you'll have learned how to read, explore, transform, summarise, and visualise data. These are skills that you can apply to any dataset you'll encounter in your career.
+
+The data comes from the [NHSBSA Open Data Portal](https://opendata.nhsbsa.net/dataset/english-prescribing-dataset-epd-with-snomed-code), which publishes the English Prescribing Dataset (EPD) monthly. Before starting the analysis, it's worth understanding how we got the data because **sourcing and preparing data is where most real-world analysis projects spend the majority of their time**.
+
+**Note:** For teaching speed and simplicity, this notebook deliberately uses **one month** of data. To change this, edit the **YAML params** at the top of the `.Rmd` or `.qmd` source (not the rendered HTML):
+
+```
+params:
+  use_one_month: true
+  sample_month: 202511
+```
+
+Set `use_one_month: false` to run all months. The repository only includes the **latest‑month** teaching extracts. If you want the full 12‑month data, you must download it locally using `scripts/download_antibiotic_prescriptions.R`.
+
+Let's start by loading the packages we need.
+
+```{r packages}
+library(tidyverse)
+library(broom)
+```
+
+The tidyverse is a collection of R packages designed for data science. It includes `readr` for reading data, `dplyr` for manipulation, `ggplot2` for visualisation, and several others. Loading `tidyverse` gives us access to all of them.
+
+We also load `broom` for producing tidy summary tables from model output.
+
+---
+
+## 1. Where the Data Comes From
+
+In real life data rarely arrives clean and ready to use. This section outlines how we sourced the data for this analysis including some challenges. If you're interested in a career in data analysis, **this is an important section to follow**, because it reflects what the job actually looks like.
+
+### Problem: 7 GB per month
+
+The NHSBSA publishes the English Prescribing Dataset monthly. Each month's file contains every prescription dispensed in England. This includes roughly 10 million rows covering every drug and every GP practice. A single month comes in at 7 GB. We only need antibiotics (BNF section 5.1), which are about 3% of the total. Downloading 7 GB to keep 3% is wasteful, especially if we wish to do it many times over to look at trends over time.
+
+### Solution: server-side filtering via API
+
+The NHSBSA portal provides a [CKAN API](https://docs.ckan.org/en/latest/maintaining/datastore.html#cknext-datastore-search-sql) that accepts SQL queries. Instead of downloading everything, we send a query like:
+
+```sql
+SELECT YEAR_MONTH, PRACTICE_CODE, BNF_CODE, ITEMS, NIC, ...
+FROM EPD_SNOMED_202511
+WHERE BNF_CODE LIKE '0501%'
+```
+
+This runs on the server and returns only the antibiotic rows. This is about 200,000 rows per month instead of 10 million. The download script (`scripts/download_antibiotic_prescriptions.R`) automates this for 12 months, saving each month to its own file so that if the connection drops, we don't lose progress.
+
+The download script also fetches each practice's **total prescribing volume**. This is the count of all prescription items (not just antibiotics) per practice per month. This is done with a second server-side query that groups and sums the full dataset without transferring individual rows. We use this later to compare prescribing patterns across different provider types (GP practices, walk-in centres, urgent care). For deeper analysis of GP practices specifically, we use registered patient numbers as the denominator instead. This gives us a per-capita rate that better reflects how much prescribing each practice does relative to its population.
+
+### Issue: the schema change
+
+When we first ran the download for the latest available full year (December 2024 to November 2025), nine months downloaded successfully, but three months silently failed. December 2024, January 2025, and February 2025 returned server errors with no useful message.
+
+After investigation, we discovered the cause: **the NHSBSA changed their column names in March 2025**. Before March, the antibiotic code column was called `BNF_CODE`. From March onwards, it became `BNF_PRESENTATION_CODE`. Our query asked for `BNF_PRESENTATION_CODE` — a column that didn't exist in the older months.
+
+| Column | Before March 2025 | From March 2025 |
+|--------|-------------------|-----------------|
+| Drug code | `BNF_CODE` | `BNF_PRESENTATION_CODE` |
+| Chemical | `BNF_CHEMICAL_SUBSTANCE` | `BNF_CHEMICAL_SUBSTANCE_CODE` |
+| Daily dose | `ADQUSAGE` | `ADQ_USAGE` |
+
+The was relatively easy to fix once identified. It required detecting which schema a particular month uses and adjust the query accordingly.
+
+### Lesson: data is messy
+
+This scenario is typical of working with real data. Data providers change column names, restructure formats, introduce inconsistencies between time periods, and rarely announce these changes prominently. The API returned an opaque "Internal Server Error", as opposed to "column not found." This data no doubt has a number of processes underpinning it to make it available for public consumption. The issues here could be relatively minor compared to more complex scenarios on other projects.
+
+Debugging this required:
+
+1. **Noticing the problem** — three months were missing from a 12-month download
+2. **Isolating the cause** — testing individual months to find which ones failed
+3. **Investigating the API** — querying the column metadata for old vs new months
+4. **Building a fix** — writing schema-detection logic that handles both formats
+
+This is a pattern you'll encounter repeatedly in data work. The analysis code below is the visible part. The invisible part includes sourcing, cleaning, validating, and debugging the data and this is where most of the effort goes. Experienced analysts expect this.
+
+> **Rule of thumb**: In most data projects, more of the time can be spent getting the data right, than performing the analysis itself.
+
+### Demographic context data
+
+The prescribing data tells us *what* was prescribed, but not *why* rates might vary between practices. To make fair comparisons later, we also download demographic data about each practice's patient population from two additional sources:
+
+1. **Deprivation scores** from the [Public Health England Fingertips API](https://fingertips.phe.org.uk/) — a population-weighted Index of Multiple Deprivation (IMD) score for each practice, reflecting the socioeconomic circumstances of its patients.
+2. **Patient list sizes and age profiles** from [NHS Digital's "Patients Registered at a GP Practice"](https://digital.nhs.uk/data-and-information/publications/statistical/patients-registered-at-a-gp-practice) publication — the number of registered patients broken down by five-year age bands.
+
+These are fetched by `scripts/download_demographics.R` and cached locally. We'll use them in sections 7 and 8 to explore whether deprivation and age explain some of the variation in prescribing rates.
+
+> **Lesson: no single dataset tells the whole story**
+>
+> Real-world analysis almost always requires stitching together data from multiple sources. Prescribing records alone can tell us *how much* was prescribed, but understanding *why* requires context. Deprivation indices, population demographics and organisational classifications are each held by a different provider, in a different format, with their own quirks. The ability to identify what additional data you need, find it, and link it reliably to your primary dataset is a valuable skill in data analysis.
+
+---
+
+## 2. Reading Data
+
+The first step in any analysis is getting your data into suitable software such as R. Our data is stored in a CSV file (comma-separated values) which is a common format for tabular data that you can open in e.g. MS Excel.
+
+> **Default is one month**: This document runs in one-month mode by default. See the note above for the YAML params to change this.
+>
+> **Aggregated input**: This version uses a pre-aggregated file at practice + chemical + month level for easier sharing. For the tutorial we use a **latest available month** extract to keep file sizes small.
+
+```{r read-data}
+# Read the aggregated antibiotic prescribing data (practice + chemical + month)
+data_path <- "data/processed/teaching/antibiotics_practice_chemical_latest.csv"
+if (!file.exists(data_path)) {
+  stop(sprintf("Missing %s. Generate it via scripts/download_antibiotic_prescriptions.R.", data_path))
+}
+
+antibiotics <- read_csv(data_path) %>%
+  filter(!is.na(practice_code), practice_code != "-") %>%
+  filter_to_month()
+
+# Load lookup table for human-readable chemical substance names
+chemical_names <- read_csv("data/processed/lookups/bnf_chemical_substance_lookup.csv")
+
+# Look at the first few rows (formatted for decimal alignment)
+antibiotics %>%
+  head(6) %>%
+  mutate(across(c(items, quantity, adqusage, nic), ~round(., 2))) %>%
+  knitr::kable(
+    format = "html",
+    digits = 2,
+    align = c("r", "l", "l", "r", "r", "r", "r"),
+    table.attr = 'style="font-variant-numeric: tabular-nums;"'
+  )
+```
+
+The `read_csv()` function from the readr package is fast and makes sensible guesses about column types. The `head()` function shows us the first six rows, giving us a quick preview of what we're working with.
+
+We also remove rows with missing/placeholder practice codes (e.g. `-`). Our primary focus is comparing GP surgeries, so we need identifiable practices. In a different context we might consider imputation strategies, but here we keep the analysis grounded in real, traceable organisations.
+
+---
+
+## 3. Understanding Your Data
+
+Before diving into analysis, we need to understand what we have. How many rows? How many columns? What does each column represent? Skipping this step is a common mistake as you can't analyse data you don't understand.
+
+We saw previously how messy the journey from source to CSV can be. But having clean data isn't enough and you also need to understand what it *represents*. In our case, that means knowing what a GP practice is, how BNF codes classify drugs, and that each row captures prescriptions for one practice in one month for one drug formulation. Without that domain context, it's almost impossible to build a mental map to help identify how to proceed.
+
+```{r explore-dimensions}
+# How big is the dataset?
+dim(antibiotics)
+
+# What are the column names?
+names(antibiotics)
+```
+
+```{r explore-structure}
+# Get a compact summary of the data structure
+glimpse(antibiotics)
+```
+
+```{r explore-summary}
+# Statistical summary of each column
+summary(antibiotics)
+```
+
+Let's understand what each column means in context:
+
+| Column                   | Meaning                                                     |
+|--------------------------|-------------------------------------------------------------|
+| `year_month`             | Time period in YYYYMM format (e.g., 202511 = November 2025) |
+| `practice_code`          | Unique identifier for each GP practice                       |
+| `bnf_chemical_substance` | Code identifying the drug's active ingredient                |
+| `quantity`               | Number of physical units dispensed (tablets, capsules, etc.) |
+| `items`                  | Number of prescription items issued                          |
+| `adqusage`               | Average Daily Quantities — a standardised measure of dose    |
+| `nic`                    | Net Ingredient Cost in pounds (£)                            |
+
+**Key insight**: Each row represents all prescriptions of ONE chemical substance, from ONE practice, in ONE month. This data is already aggregated and we can't see individual patient prescriptions.
+
+### What is a BNF code?
+
+The `bnf_chemical_substance` column uses codes from the **British National Formulary (BNF)**, the standard classification system for drugs prescribed in the NHS. Understanding this hierarchy is essential, because it's how we identify antibiotics in the data.
+
+The BNF organises all drugs into numbered **chapters**, each covering a body system or therapeutic area:
+
+- Chapter 1 — Gastro-Intestinal System
+- Chapter 2 — Cardiovascular System
+- Chapter 3 — Respiratory System
+- Chapter 4 — Central Nervous System
+- **Chapter 5 — Infections**
+
+Chapter 5 (Infections) is further divided into **sections**:
+
+- **5.1 — Antibacterial Drugs (antibiotics — our focus)**
+- 5.2 — Antifungal Drugs
+- 5.3 — Antiviral Drugs
+
+And section 5.1 breaks down into **paragraphs** representing antibiotic families:
+
+- **5.1.1** — Penicillins (e.g. amoxicillin, flucloxacillin)
+- **5.1.2** — Cephalosporins (e.g. cefalexin)
+- **5.1.3** — Tetracyclines (e.g. doxycycline)
+- **5.1.5** — Macrolides (e.g. clarithromycin, azithromycin)
+
+This hierarchy is encoded in BNF codes. In this aggregated dataset we keep the **chemical substance** code (e.g. `0501013B0` for amoxicillin) rather than the full 15-character presentation code.
+
+- `05` — Chapter 5: Infections
+- `0501` — Section 5.1: Antibacterial Drugs
+- `050101` — Paragraph 5.1.1: Penicillins
+- `0501013B0` — Chemical substance (amoxicillin)
+- `0501013B0AAAAAA` — Specific product, strength, and form
+
+> **Key point**: This is why filtering with `str_starts(bnf_chemical_substance, "0501")` captures every antibiotic in our dataset. Any code starting with "0501" belongs to BNF section 5.1 — Antibacterial Drugs.
+
+> **Lesson: understand the domain, not just the data**
+>
+> It's tempting to jump straight into code, but time spent understanding what the data *represents* pays for itself many times over. Knowing that a GP practice is a primary care clinic, that BNF codes encode a drug hierarchy, and that each row is an aggregation rather than an individual prescription. These aren't technical details, they're the foundation every later decision rests on. Without that context, you can write perfectly valid code that answers the wrong question. The best analysts invest as much effort in learning the problem domain as they do in learning the tools.
+
+---
+
+## 4. Data Transformation
+
+Raw data rarely comes in the exact form we need. We often need to create new variables, filter to relevant subsets, or reshape the data. The `dplyr` package provides intuitive functions for these tasks.
+
+### Selecting Columns with `select()`
+
+When you only need certain columns, `select()` keeps your data tidy and reduces clutter.
+
+```{r select-example}
+# Keep only the columns we need for a prescribing analysis
+antibiotics %>%
+  select(practice_code, bnf_chemical_substance, items, quantity, adqusage) %>%
+  head() %>%
+  knitr::kable(format.args = list(big.mark = ","))
+```
+
+> **The Pipe Operator**
+>
+> The `%>%` pipe comes from the tidyverse (specifically the magrittr package). It takes the output of one function and passes it as input to the next. Read it as "then". R 4.1+ also provides a built-in native pipe `|>` which works similarly.
+
+### New Variables with `mutate()`
+
+Let's calculate the average quantity per prescription item. This tells us how many physical units (tablets, capsules, etc.) are dispensed per prescription.
+
+```{r mutate-quantity}
+# Add a new column for quantity per item
+antibiotics <- antibiotics %>%
+  mutate(quantity_per_item = quantity / items)
+
+# Check it worked
+antibiotics %>%
+  select(practice_code, bnf_chemical_substance, items, quantity, quantity_per_item) %>%
+  head(10) %>%
+  knitr::kable(digits = c(0, 0, 0, 0, 1))
+```
+
+### Filtering Rows with `filter()`
+
+Perhaps we only want to look at a specific time period or a subset of practices.
+
+```{r filter-example}
+# How many rows in November 2025?
+antibiotics %>%
+  filter(year_month == 202511) %>%
+  nrow()
+
+# How many rows have large quantities (over 100 units per item)?
+antibiotics %>%
+  filter(quantity_per_item > 100) %>%
+  nrow()
+```
+
+---
+
+## 5. Summarising Data
+
+A powerful pattern in data analysis is **split-apply-combine**: split the data into groups, apply a calculation to each group, and combine the results. In dplyr, we use `group_by()` and `summarise()`.
+
+### Summarising by Drug Type
+
+Which antibiotics are prescribed most frequently?
+
+```{r summarise-by-chemical}
+# Total prescriptions by chemical substance
+by_chemical <- antibiotics %>%
+  group_by(bnf_chemical_substance) %>%
+  summarise(
+    total_items = sum(items, na.rm = TRUE),
+    total_quantity = sum(quantity, na.rm = TRUE),
+    n_records = n()
+  ) %>%
+  left_join(chemical_names, by = "bnf_chemical_substance") %>%
+  arrange(desc(total_items))
+
+# Show top 10
+by_chemical %>%
+  head(10) %>%
+  mutate(
+    total_items = format(total_items, big.mark = ","),
+    total_quantity = format(round(total_quantity), big.mark = ","),
+    n_records = format(n_records, big.mark = ",")
+  ) %>%
+  select(bnf_chemical_substance_name, total_items,
+         total_quantity, n_records) %>%
+  knitr::kable(
+    col.names = c("Chemical Substance", "Total Items", "Total Quantity",
+                  "Records"),
+    align = c("l", "r", "r", "r")
+  )
+```
+
+> **Handling Missing Values**
+>
+> The `na.rm = TRUE` argument tells R to ignore missing values when calculating sums and means. Without it, a single missing value would make the entire result `NA`.
+
+### Summarising by Practice
+
+Which practices have the highest antibiotic prescribing rate? Raw totals can be misleading because larger practices naturally prescribe more, so we normalise by the number of registered patients.
+
+```{r summarise-by-practice}
+# Load patient list sizes
+practice_demographics <- read_csv("data/processed/lookups/practice_demographics.csv",
+                            show_col_types = FALSE)
+
+# Total prescriptions by practice, normalised per 1,000 patients
+by_practice <- antibiotics %>%
+  group_by(practice_code) %>%
+  summarise(
+    total_items = sum(items, na.rm = TRUE),
+    n_different_drugs = n_distinct(bnf_chemical_substance)
+  ) %>%
+  inner_join(practice_demographics %>% select(practice_code, list_size),
+             by = "practice_code") %>%
+  filter(list_size >= 100) %>%
+  mutate(items_per_1000 = round((total_items / list_size) * 1000)) %>%
+  arrange(desc(items_per_1000))
+
+# Show top 10 practices
+by_practice %>%
+  head(10) %>%
+  mutate(
+    items_per_1000 = format(items_per_1000, big.mark = ","),
+    total_items = format(total_items, big.mark = ","),
+    list_size = format(list_size, big.mark = ",")
+  ) %>%
+  select(practice_code, list_size, total_items, items_per_1000, n_different_drugs) %>%
+  knitr::kable(
+    col.names = c("Practice Code", "Registered Patients", "Total Items",
+                  "Items per 1,000 Patients", "No. Different Drugs"),
+    align = c("l", "r", "r", "r", "r")
+  )
+```
+
+The `n_distinct()` function counts unique values. In this case it's how many different antibiotic types each practice prescribed.
+
+We note for now there are some very high rates. We will explore this further shortly. 
+
+---
+
+## 6. Visualisation
+
+Now let's turn those numbers into charts. We'll use ggplot2, which builds plots layer by layer using a "grammar of graphics".
+
+### Top 10 Antibiotics (Bar Chart)
+
+Which antibiotics are prescribed most often?
+
+```{r bar-chart, fig.cap="Top 10 antibiotics ranked by total prescription items"}
+ggplot(by_chemical %>% head(10),
+       aes(x = reorder(bnf_chemical_substance_name, total_items),
+           y = total_items)) +
+  geom_col(fill = "#F57C00", colour = "white") +
+  coord_flip() +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Top 10 Antibiotics by Prescription Volume",
+    x = NULL,
+    y = "Total Items Prescribed"
+  ) +
+  theme_minimal()
+```
+
+The bar chart makes it easy to compare volumes. Using `coord_flip()` turns vertical bars horizontal, making labels easier to read.
+
+### Prescribing Rates (Overview)
+So far we've been looking at raw prescription data. To compare practices fairly, we can use a **rate**. Initially we will start with the number of antibiotic items per 1,000 total prescriptions. This measures the share of a practice's prescribing that is antibiotics. This does not include external data and is just a simple proportion from the prescribing data itself.
+
+```{r section5-practice-rates}
+# Load practice-level monthly data
+practice_data_summary <- read_csv("data/processed/teaching/antibiotics_practice_summary_latest.csv",
+                              show_col_types = FALSE) %>%
+  filter_to_month() %>%
+  filter(practice_name != "UNIDENTIFIED DOCTORS")
+
+# Summarise antibiotic items per practice
+practice_rates <- practice_data_summary %>%
+  group_by(practice_code, practice_name) %>%
+  summarise(
+    total_items = sum(total_all_items, na.rm = TRUE),
+    abx_items = sum(antibiotic_items, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(abx_items >= 100) %>%
+  mutate(abx_rate_per_1000 = (abx_items / total_items) * 1000)
+
+cat(sprintf("Practices with 100+ antibiotic items: %s\n",
+            format(nrow(practice_rates), big.mark = ",")))
+```
+
+### Prescribing Rate Distribution
+
+```{r histogram-rates, fig.cap="Most practices cluster around a typical rate, but some prescribe far more antibiotics per 1,000 prescriptions"}
+ggplot(practice_rates, aes(x = abx_rate_per_1000)) +
+  geom_histogram(binwidth = 5, fill = "#1976D2", colour = "white") +
+  labs(
+    title = "Distribution of Antibiotic Prescribing Rates Across Practices",
+    x = "Antibiotic Items per 1,000 Prescriptions",
+    y = "Number of Practices"
+  ) +
+  theme_minimal()
+```
+
+The histogram reveals a roughly bell-shaped distribution with a long right tail. There are a handful of practices with prescribing rates two or three times higher than the majority. Are these practices genuinely over-prescribing, or is something else going on?
+
+### Antibiotic Items vs Practice Size
+
+Let's now check whether practice size (registered patients) relates to antibiotic volume. If larger practices prescribe proportionally more antibiotics, we'd expect a strong positive relationship. This would confirm patient list size as a sensible denominator for later analysis.
+
+```{r scatter-abx-vs-listsize, fig.cap="Larger practices prescribe more antibiotics — confirming patient list size as a sensible denominator"}
+ggplot(practice_rates %>%
+  inner_join(practice_demographics %>% select(practice_code, list_size),
+             by = "practice_code"),
+       aes(x = list_size, y = abx_items)) +
+  geom_point(alpha = 0.3, colour = "#1976D2") +
+  geom_smooth(method = "lm", se = FALSE, colour = "#C62828", linetype = "dashed") +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Larger Practices Prescribe More Antibiotics",
+    subtitle = "Strong positive relationship confirms patient list size as a sensible denominator",
+    x = "Registered Patients",
+    y = "Total Antibiotic Items (analysis month)"
+  ) +
+  theme_minimal()
+```
+
+The strong linear relationship confirms that practices with more patients prescribe proportionally more antibiotics. This means we can meaningfully normalise by list size when we need per-capita rates later.
+
+### Classifying Provider Type
+
+The NHS Organisation Data Service (ODS) assigns each prescribing organisation a role code. We can use this to distinguish GP practices from walk-in centres, out-of-hours services, and other settings.
+
+```{r section5-provider-type}
+# Load ODS prescriber data (headerless CSV; col 1 = practice code, col 26 = role code)
+ods_raw_practice_roles <- read_csv("data/raw/epraccur.csv", col_names = FALSE, show_col_types = FALSE)
+
+# Regex used to identify non-traditional GP services by name
+non_gp_pattern <- "WALK.?IN|GP.?LED|EXTENDED ACCESS|URGENT CARE|FEDERAT|FEDERATION|NETWORK|GPA\\b"
+
+ods_roles_practice <- ods_raw_practice_roles %>%
+  select(practice_code = X1, role_code = X26) %>%
+  mutate(
+    primary_role = sub("\\|.*", "", role_code),
+    provider_type = case_when(
+      primary_role == "RO76"  ~ "GP Practice",
+      primary_role == "RO80"  ~ "Out of Hours",
+      primary_role == "RO87"  ~ "Walk-in Centre",
+      primary_role == "RO259" ~ "Urgent & Emergency Care",
+      primary_role == "RO321" ~ "Extended Access / Hub",
+      TRUE                    ~ "Other"
+    )
+  ) %>%
+  select(practice_code, provider_type) %>%
+  distinct(practice_code, .keep_all = TRUE)
+
+# Join provider type to practice rates
+practice_rates <- practice_rates %>%
+  left_join(ods_roles_practice, by = "practice_code") %>%
+  mutate(
+    provider_type = if_else(is.na(provider_type), "Other", provider_type),
+    provider_type = if_else(provider_type == "GP Practice" &
+                              grepl(non_gp_pattern, toupper(practice_name)),
+                            "Other",
+                            provider_type)
+  )
+
+# How many of each type?
+practice_rates %>%
+  count(provider_type, sort = TRUE) %>%
+  knitr::kable(col.names = c("Provider Type", "Count"), align = c("l", "r"))
+```
+
+### Prescribing Rates by Provider Type
+
+```{r boxplot-by-type, fig.cap="The apparent outliers in prescribing rate are almost entirely non-GP provider types"}
+ggplot(practice_rates, aes(x = reorder(provider_type, abx_rate_per_1000, FUN = median),
+                            y = abx_rate_per_1000)) +
+  geom_boxplot(fill = "#E3F2FD", colour = "grey40") +
+  coord_flip() +
+  labs(
+    title = "Antibiotic Prescribing Rates by Provider Type",
+    subtitle = "Walk-in centres and urgent care have much higher rates than GP practices",
+    x = NULL,
+    y = "Antibiotic Items per 1,000 Prescriptions"
+  ) +
+  theme_minimal()
+```
+
+The outliers are now much more easily explained. Walk-in centres, urgent care hubs, and out-of-hours services see mostly acute illness (infections, injuries), so antibiotics make up a much larger share of their prescriptions. What looked like alarming outliers are entirely expected once you account for provider type.
+
+> **A Key Lesson**
+>
+> Context matters in data analysis. What initially looks like a powerful result, may become easily explainable with more exploration and a tightening in approach.
+
+---
+
+## 7. Simple Statistical Analysis
+
+Visualisation helps us spot patterns, but statistics help us quantify them. In Section 6, we saw that provider type explains the most extreme outliers. Now let's filter to GP practices only and explore what explains the remaining variation?
+
+```{r section6-gp-filter}
+gp_practices_analysis <- practice_rates %>%
+  filter(provider_type == "GP Practice")
+
+cat(sprintf("GP practices for analysis: %d\n", nrow(gp_practices_analysis)))
+```
+
+### Adding Demographic Context
+
+One plausible explanation is **age profile**. Elderly patients are more susceptible to respiratory and urinary tract infections, so practices with older populations might reasonably prescribe more antibiotics. We can explore that first, then check deprivation (IMD).
+
+```{r section6-load-demographics}
+# Join to GP practices (add list_size to recompute rate per 1,000 patients)
+gp_with_imd <- gp_practices_analysis %>%
+  left_join(practice_demographics %>% select(practice_code, imd_score, list_size, pct_over_65),
+            by = "practice_code") %>%
+  filter(!is.na(imd_score)) %>%
+  filter(!is.na(list_size), list_size >= 100) %>%
+  mutate(
+    abx_rate_per_1000 = (abx_items / list_size) * 1000,
+    log_rate = log(abx_rate_per_1000)
+  )
+
+cat(sprintf("Dropped for small/unknown list sizes: %d\n",
+            nrow(gp_practices_analysis) - nrow(gp_with_imd)))
+cat(sprintf("GP practices with IMD data: %d\n", nrow(gp_with_imd)))
+```
+
+### Correlation
+
+Correlation measures the strength and direction of a linear relationship between two variables. It ranges from -1 (perfect negative relationship) to +1 (perfect positive relationship), with 0 meaning no linear relationship.
+
+### Age Profile vs Prescribing Rate
+
+```{r section7-age-correlation}
+age_correlation <- cor(gp_with_imd$pct_over_65,
+                       gp_with_imd$abx_rate_per_1000,
+                       use = "complete.obs")
+
+print(paste("Correlation between % over 65 and prescribing rate:",
+            round(age_correlation, 3)))
+```
+
+```{r section7-scatter-age, fig.cap="Practices with more elderly patients prescribe substantially more antibiotics (log scale)"}
+ggplot(gp_with_imd, aes(x = pct_over_65, y = log_rate)) +
+  geom_point(alpha = 0.3, colour = "#1976D2") +
+  geom_smooth(method = "lm", se = TRUE, colour = "#C62828", linetype = "dashed") +
+  labs(
+    title = "Does Age Profile Affect Antibiotic Prescribing?",
+    subtitle = paste("Correlation:", round(age_correlation, 3)),
+    x = "Patients Aged 65+ (%)",
+    y = "log(Antibiotic Items per 1,000 Patients)"
+  ) +
+  theme_minimal()
+```
+
+The percentage of patients over 65 alone explains about `r round(age_correlation^2 * 100, 0)`% of the variation in prescribing rates. The pattern makes clinical sense.
+
+### Deprivation vs Prescribing Rate
+
+Age profile is a strong predictor. What about deprivation? The Index of Multiple Deprivation (IMD) measures how deprived an area is. The higher scores mean greater deprivation.
+
+```{r section6-correlation}
+imd_correlation <- cor(gp_with_imd$imd_score,
+                       gp_with_imd$abx_rate_per_1000,
+                       use = "complete.obs")
+
+print(paste("Correlation between IMD score and prescribing rate:",
+            round(imd_correlation, 3)))
+```
+
+```{r section6-scatter-imd, fig.cap="Practices in more deprived areas tend to prescribe slightly more antibiotics per patient (log scale)"}
+ggplot(gp_with_imd, aes(x = imd_score, y = log_rate)) +
+  geom_point(alpha = 0.3, colour = "#1976D2") +
+  geom_smooth(method = "lm", se = TRUE, colour = "#C62828", linetype = "dashed") +
+  labs(
+    title = "Does Local Deprivation Affect Antibiotic Prescribing?",
+    subtitle = paste("Correlation:", round(imd_correlation, 3)),
+    x = "IMD Score (higher = more deprived)",
+    y = "log(Antibiotic Items per 1,000 Patients)"
+  ) +
+  theme_minimal()
+```
+
+There is a weak positive correlation. Practices in more deprived areas tend to prescribe *slightly more* antibiotics per patient. This is consistent with higher infection burden in disadvantaged populations. However the relationship is weak and IMD alone explains a tiny fraction of variation.
+
+But even the strongest single predictor leaves most of the variation unexplained. What if we combined multiple predictors into a single model? We can do that using regression based methods which is what we will do in the next section.
+
+---
+
+## 8. Log-Rate Linear Model
+
+So far, we've explored the data using summaries and visualisation. Now we'll take it further by building a **linear regression model**. This stabilises variance and reduces the influence of high-rate outliers. There are other choices we could consider here, for example negative binomial or Poission. However, for simplicity we will restrict ourselves to a simple model for the purpose of this tutorial.
+
+The model predicts a practice's **log prescribing rate** from deprivation and age profile.
+
+### 8.1 Loading Practice-Level Data
+
+In sections 2–7, we worked with raw prescription records (one row per drug per practice per month). Now we'll reuse the pre-aggregated file that summarises each practice's total prescribing activity per month, including both antibiotic and non-antibiotic items.
+
+```{r load-practice-data}
+# Reuse practice-level monthly data loaded in Section 5
+head(practice_data_summary)
+```
+
+This file has one row per practice per month, with columns for total items, antibiotic items, and costs. Because we're working with a single month, we'll use that month directly rather than building a 12-month summary.
+
+```{r practice-summary-1m}
+# Single-month practice summary
+practice_summary_one_month <- practice_data_summary %>%
+  group_by(practice_code, practice_name) %>%
+  summarise(
+    total_items_1m = sum(total_all_items, na.rm = TRUE),
+    abx_items_1m = sum(antibiotic_items, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(abx_items_1m >= 100)  # Exclude tiny practices with unstable rates
+
+cat(sprintf("Practices with 100+ antibiotic items: %d
+", nrow(practice_summary_one_month)))
+cat(sprintf("Analysis month: %d
+", unique(practice_data_summary$year_month)))
+```
+
+> **Why Filter to 100+ Items?**
+>
+> Very small practices produce unreliable rates. This means a handful of prescriptions either way would swing their rate dramatically. The 100-item threshold keeps most practices while still removing extreme small denominators.
+
+### 8.2 Filtering to GP Practices
+
+As in Section 7, we need to filter to traditional GP practices before modelling. The prescribing data includes walk-in centres, out-of-hours services, and other non-GP settings that have fundamentally different prescribing profiles. We reuse the same three-layer filter from earlier: ODS role code, keyword matching, and manual exclusion list.
+
+```{r section8-gp-filter}
+# Reuse ODS roles from Section 6 to filter to GP practices
+practice_summary_one_month <- practice_summary_one_month %>%
+  left_join(ods_roles_practice, by = "practice_code") %>%
+  mutate(provider_type = if_else(is.na(provider_type), "Other", provider_type)) %>%
+  filter(provider_type == "GP Practice",
+         !grepl(non_gp_pattern, toupper(practice_name))) %>%
+  select(-provider_type)
+
+cat(sprintf("GP practices for modelling: %d
+", nrow(practice_summary_one_month)))
+```
+
+### 8.3 Adding Demographic Context
+
+Prescribing rates don't exist in a vacuum. A practice in a deprived area with an elderly population will naturally see more infections than one in an affluent area with young professionals. To make fair comparisons, we need to account for these differences.
+
+```{r load-demographics}
+# Reuse practice demographics (created by scripts/download_demographics.R)
+# Preview the columns we'll use in the model
+practice_demographics %>%
+  select(practice_code, list_size, imd_score, pct_over_65, pct_under_5) %>%
+  head()
+```
+
+The demographic variables are:
+
+| Variable | Meaning |
+|----------|---------|
+| `list_size` | Number of registered patients at the practice — used to compute prescribing rates per 1,000 patients |
+| `imd_score` | Index of Multiple Deprivation — higher values mean more deprived populations, which are associated with higher infection rates |
+| `pct_over_65` | Percentage of registered patients aged 65+ - elderly patients have more respiratory and urinary tract infections |
+| `pct_under_5` | Percentage of registered patients aged under 5 - young children have frequent acute illness |
+
+```{r join-demographics}
+# Join demographics to GP practices
+gp_practices_model <- practice_summary_one_month %>%
+  left_join(
+    practice_demographics %>% select(practice_code, list_size, imd_score, pct_over_65, pct_under_5),
+    by = "practice_code"
+  ) %>%
+  filter(!is.na(imd_score), !is.na(pct_over_65)) %>%
+  filter(!is.na(list_size), list_size >= 500) %>%
+  mutate(rate_per_1000 = (abx_items_1m / list_size) * 1000,
+         log_rate = log(rate_per_1000))
+
+n_dropped <- nrow(practice_summary_one_month) - nrow(gp_practices_model)
+
+cat(sprintf("GP practices with demographics: %d
+", nrow(gp_practices_model)))
+cat(sprintf("Dropped (missing demographics): %d
+", n_dropped))
+```
+
+It's reassuring that we don't lose many records when matching to the demographic data. 
+
+### 8.4 Fitting the Log-Rate Model
+
+We model the **log of the prescribing rate** so that extreme values have less influence.
+
+```{r fit-log-rate-model}
+# Fit the log-rate linear model
+model_log_rate <- lm(
+  log_rate ~ imd_score + pct_over_65 + pct_under_5,
+  data = gp_practices_model
+)
+
+summary(model_log_rate)
+```
+
+### 8.5 Interpreting the Coefficients
+
+We'll use `broom::tidy()` to get a clean coefficient table.
+
+```{r tidy-coefficients}
+# Tidy coefficient table
+tidy(model_log_rate, conf.int = TRUE)
+```
+
+### 8.6 Goodness of Fit
+
+```{r goodness-of-fit}
+model_summary <- summary(model_log_rate)
+
+cat(sprintf("R-squared:          %.3f (%.1f%% of variation explained)
+",
+            model_summary$r.squared, model_summary$r.squared * 100))
+cat(sprintf("Adjusted R-squared: %.3f
+", model_summary$adj.r.squared))
+cat(sprintf("F-statistic:        %.1f (p < 2.2e-16)
+",
+            model_summary$fstatistic[1]))
+```
+
+For comparison, using a full 12‑month aggregate (with the same model and filters) yields an R² of about **0.373**.
+
+## 9. Practical Considerations
+
+### Dealing with Large Data
+
+For teaching we worked with a **single month** to keep file sizes small and the workflow fast. In real‑world analysis you should aim to use the full dataset and build infrastructure to handle it:
+
+- Seek to use all the data for robust conclusions.
+- Consider more compute (or GPU‑backed workflows) for heavier modelling.
+- Data work takes time. For example this tutorial involves a lot of work, but includes several simplifications; and in practice there are many more avenues to explore.
+
+### Reproducibility
+
+Analysis can become much more useful if others can reproduce it. Beyond the environment, reproducibility means being able to rebuild results and trust that changes don’t introduce bugs:
+
+- Use version control (git) so changes are tracked and reversible.
+- Look to support the user with information about the environment and packages they need to successfully run your work.
+- Run tests or validation checks to confirm code still works as expected.
+
+### Using AI (with oversight)
+
+AI can speed up coding and drafting, but statistical choices still need human judgement:
+
+- AI can be very useful for boilerplate and exploration.
+- Documentation and knowledge capture 
+- Test generation and validation
+- Architectural consistency can become an issue without strong human ownership
+- Model choices, thresholds, and transformations require careful review.
+
+## Conclusion
+
+In this tutorial, you've learned the fundamental workflow of data analysis:
+
+1. **Read** data into R using `read_csv()`
+2. **Understand** your data with `dim()`, `names()`, `summary()`, and `glimpse()`
+3. **Transform** data using `select()`, `mutate()`, and `filter()`
+4. **Summarise** data with `group_by()` and `summarise()`
+5. **Visualise** patterns with histograms, bar charts, and boxplots
+6. **Analyse** relationships with correlation and scatter plots
+7. **Model** continuous outcomes with linear regression and interpret residuals as outlier flags
+
+These skills should transfer to any dataset.
+
+Beyond the technical skills, five analytical lessons emerged along the way:
+
+1. **Most of the work is data preparation.** Sourcing, cleaning, and linking data took more effort than the modelling itself.
+2. **Understand the domain, not just the data.** Knowing what a GP practice is, how BNF codes work, and what each row represents shaped every decision we made.
+3. **No single dataset tells the whole story.** We needed prescribing records, demographics, and organisational classifications to draw meaningful conclusions.
+4. **Apparent outliers may be easily explainable.** The most extreme prescribers turned out to be walk-in centres.
+5. **Model results are prompts for inquiry, not conclusions.** A large residual tells you something is unusual, not that something is wrong.
+
+### Next Steps
+
+This analysis used a simple linear model with three demographic predictors and achieved a modest R², meaning most of the variation in prescribing rates remains unexplained. There are two directions to improve on this.
+
+**Bring in more data.** Our model only knows about deprivation and age. Other factors that plausibly affect antibiotic prescribing include local infection rates. Each additional data source requires its own sourcing, cleaning, and joining, exactly the skills you practised in sections 1–4.
+
+**Use a more appropriate model.** We modelled a rate directly with `lm()`, which assumes the outcome can take any value, including negative ones. In reality, prescribing rates are counts divided by a population. Generalised linear models (GLMs) such as Poisson or Negative Binomial regression are designed for count data and would be a natural next step.
+
+### Useful Links
+
+- [ESPAUR Report (UKHSA / GOV.UK)](https://www.gov.uk/government/publications/english-surveillance-programme-antimicrobial-utilisation-and-resistance-espaur-report) — official surveillance of antibiotic use and resistance in England
+- [BNF 5.1: Antibacterial Drugs (OpenPrescribing)](https://openprescribing.net/bnf/0501/) — explore national antibiotic prescribing trends by drug and practice
+- [Prescribing Data: BNF Codes (Bennett Institute)](https://www.bennett.ox.ac.uk/blog/2017/04/prescribing-data-bnf-codes/) — how the 15-character BNF code hierarchy works
+
+---
+
+*Data source: [English Prescribing Dataset (EPD)](https://opendata.nhsbsa.net/dataset/english-prescribing-dataset-epd-with-snomed-code), NHSBSA Open Data Portal*

@@ -1,0 +1,19 @@
+Package: antibiotic-prescribing-teaching
+Type: Project
+Title: Teaching Materials for Antibiotic Prescribing Analysis
+Version: 0.0.0
+Authors@R: c(
+  person("Ben", "Stanbury", role = c("aut", "cre"))
+)
+Description: Teaching materials and analysis notebooks for NHS antibiotic prescribing data.
+License: MIT
+Encoding: UTF-8
+LazyData: true
+Imports:
+  broom,
+  jsonlite,
+  knitr,
+  lubridate,
+  rmarkdown,
+  scales,
+  tidyverse

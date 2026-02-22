@@ -1,0 +1,16 @@
+.DS_Store
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+.Rapp.history
+
+# Large data outputs (keep teaching extracts)
+data/processed/full/
+data/processed/monthly/
+
+/.quarto/
+**/*.quarto_ipynb
+
+# R Markdown asset folder (self-contained HTML)
+docs/intro_to_data_analysis_files/
