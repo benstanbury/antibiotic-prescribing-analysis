@@ -9,6 +9,9 @@
 data/processed/full/
 data/processed/monthly/
 
+# Rendered HTML (should go to docs/ via _quarto.yml)
+/*.html
+
 /.quarto/
 **/*.quarto_ipynb
 

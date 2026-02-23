@@ -6,6 +6,7 @@ bnf_chemical_substance,bnf_chemical_substance_name
 0501013C0,Amoxicillin sodium
 0501013E0,Ampicillin
 0501013K0,Co-amoxiclav (Amoxicillin/clavulanic acid)
+0501013L0,Co-fluampicil(Flucloxacillin/ampicillin)
 0501014S0,Piperacillin sodium/tazobactam sodium
 0501015P0,Pivmecillinam hydrochloride
 0501021A0,Cefaclor
@@ -29,6 +30,7 @@ bnf_chemical_substance,bnf_chemical_substance_name
 0501030Z0,Doxycycline monohydrate
 0501040C0,Amikacin
 0501040H0,Gentamicin sulfate
+0501040N0,Neomycin sulfate
 0501040U0,Tobramycin
 0501050A0,Azithromycin
 0501050B0,Clarithromycin
@@ -38,7 +40,6 @@ bnf_chemical_substance,bnf_chemical_substance_name
 0501060D0,Clindamycin hydrochloride
 0501070AC,Fidaxomicin
 0501070AE,Fosfomycin trometamol
-0501070F0,Chloramphenicol
 0501070I0,Colistimethate sodium
 0501070M0,Fusidic acid
 0501070N0,Sodium fusidate
@@ -50,18 +51,20 @@ bnf_chemical_substance,bnf_chemical_substance_name
 0501080J0,Sulfadiazine
 0501080V0,Sulfapyridine
 0501080W0,Trimethoprim
+0501090A0,Aminosalicylic acid
 0501090H0,Ethambutol hydrochloride
 0501090K0,Isoniazid
 0501090N0,Pyrazinamide
 0501090Q0,Rifabutin
 0501090R0,Rifampicin
 0501090S0,Rifampicin combined preparations
+0501100C0,Clofazimine
 0501100H0,Dapsone
 0501110C0,Metronidazole
-0501110G0,Tinidazole
 0501120L0,Ciprofloxacin
 0501120P0,Ofloxacin
 0501120X0,Levofloxacin
 0501120Y0,Moxifloxacin
 0501130H0,Methenamine hippurate
 0501130R0,Nitrofurantoin
+0501130S0,Fosfomycin calcium

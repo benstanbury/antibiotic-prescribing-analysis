@@ -12,6 +12,7 @@ format:
     code-fold: false
     self-contained: true
     embed-resources: true
+    output-file: intro_to_data_analysis_qmd.html
 execute:
   warning: false
   message: false
@@ -275,6 +276,7 @@ When you only need certain columns, `select()` keeps your data tidy and reduces 
 antibiotics %>%
   select(practice_code, bnf_chemical_substance, items, quantity, adqusage) %>%
   head() %>%
+  mutate(across(where(is.numeric), ~round(., 1))) %>%
   knitr::kable(format.args = list(big.mark = ","))
 ```
 
@@ -787,8 +789,6 @@ cat(sprintf("F-statistic:        %.1f (p < 2.2e-16)
 ",
             model_summary$fstatistic[1]))
 ```
-
-For comparison, using a full 12‑month aggregate (with the same model and filters) yields an R² of about **0.373**.
 
 ## 9. Practical Considerations
 
