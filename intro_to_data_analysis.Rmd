@@ -842,7 +842,7 @@ Beyond the technical skills, five analytical lessons emerged along the way:
 
 This analysis used a simple linear model with three demographic predictors and achieved a modest R², meaning most of the variation in prescribing rates remains unexplained. There are two directions to improve on this.
 
-**Bring in more data.** Our model only knows about deprivation and age. Other factors that plausibly affect antibiotic prescribing include local infection rates. Each additional data source requires its own sourcing, cleaning, and joining, exactly the skills you practised in sections 1–4.
+**Bring in more data.** At present the model only reflects deprivation and age, so it misses other plausible drivers of prescribing. Any additional sources should go through the same pipeline: explicit sourcing, careful cleaning, and defensible joining, following the workflow used in sections 1–4.
 
 **Use a more appropriate model.** We modelled a rate directly with `lm()`, which assumes the outcome can take any value, including negative ones. In reality, prescribing rates are counts divided by a population. Generalised linear models (GLMs) such as Poisson or Negative Binomial regression are designed for count data and would be a natural next step.
 

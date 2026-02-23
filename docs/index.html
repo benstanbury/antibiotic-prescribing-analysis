@@ -3254,11 +3254,7 @@ not that something is wrong.</li>
 predictors and achieved a modest R², meaning most of the variation in
 prescribing rates remains unexplained. There are two directions to
 improve on this.</p>
-<p><strong>Bring in more data.</strong> Our model only knows about
-deprivation and age. Other factors that plausibly affect antibiotic
-prescribing include local infection rates. Each additional data source
-requires its own sourcing, cleaning, and joining, exactly the skills you
-practised in sections 1–4.</p>
+<p><strong>Bring in more data.</strong> At present the model only reflects deprivation and age, so it misses other plausible drivers of prescribing. Any additional sources should go through the same pipeline: explicit sourcing, careful cleaning, and defensible joining, following the workflow used in sections 1–4.</p>
 <p><strong>Use a more appropriate model.</strong> We modelled a rate
 directly with <code>lm()</code>, which assumes the outcome can take any
 value, including negative ones. In reality, prescribing rates are counts
