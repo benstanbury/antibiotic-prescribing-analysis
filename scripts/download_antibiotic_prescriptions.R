@@ -167,8 +167,10 @@ fetch_page <- function(resource_name, columns, bnf_col,
   sql <- sprintf(
     paste0("SELECT %s FROM `%s`",
            " WHERE %s LIKE '%s'",
+           " ORDER BY PRACTICE_CODE, %s",
            " LIMIT %d OFFSET %d"),
-    cols_sql, resource_name, bnf_col, bnf_filter, limit, offset
+    cols_sql, resource_name, bnf_col, bnf_filter,
+    bnf_col, limit, offset
   )
   url <- paste0(
     api_base, "?resource_id=", resource_name,
@@ -579,6 +581,7 @@ antibiotics_df <- lapply(monthly_files[found], function(f) {
   read_csv(f, show_col_types = FALSE) |> standardize_month()
 }) |>
   bind_rows() |>
+  distinct() |>
   arrange(year_month, practice_code, bnf_code)
 
 cat(sprintf("Total: %s rows across %d months\n",
